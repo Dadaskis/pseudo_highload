@@ -1,12 +1,12 @@
-from aio_pika import Message, connect, Connection, Channel, Queue
-from aio_pika.abc import AbstractIncomingMessage
+from aio_pika import Message, connect, Connection, Channel, Queue, Exchange, ExchangeType, IncomingMessage
 import asyncio
 
-connection: Connection = None
-channel: Channel = None
-queue: Queue = None
+connection: Connection
+channel: Channel
+queue: Queue
+exchange: Exchange
 
-async def get_a_damn_queue(queue_name):
+async def get_queue_safe(channel: Channel, queue_name: str):
     queue = None
     try:
         queue = await channel.declare_queue(queue_name, durable=True, passive=False)
@@ -14,12 +14,33 @@ async def get_a_damn_queue(queue_name):
         queue = await channel.declare_queue(queue_name, passive=True)
     return queue
 
-async def on_message(message: AbstractIncomingMessage):
+async def get_exchange_safe(
+        channel: Channel, exchange_name: str, exchange_type: ExchangeType):
+    exchange = None
+    try:
+        exchange = await channel.declare_exchange(
+            exchange_name, exchange_type, durable=True, passive=False)
+    except Exception as e:
+        exchange = await channel.declare_exchange(
+            exchange_name, exchange_type, passive=True)
+    return exchange
+
+async def on_message(message: IncomingMessage):
+    global channel
     print(f"Received message: {message}")
     print(f"Received message body: {message.body}")
     print("Before sleep...")
     await asyncio.sleep(5.0)
     print("After sleep...")
+    message_text = f"Response for {message.correlation_id}"
+    await channel.default_exchange.publish(
+        Message(
+            message_text.encode(),
+            correlation_id=message.correlation_id
+        ),
+        routing_key=message.reply_to
+    )
+    await message.ack()
 
 async def main():
     global connection, channel, queue
@@ -28,8 +49,8 @@ async def main():
     connection = await connect("amqp://guest:guest@localhost/")
     async with connection:
         channel = await connection.channel()
-        queue = await get_a_damn_queue("main")
-        await queue.consume(on_message, no_ack=True)
+        queue = await get_queue_safe(channel, "main")
+        await queue.consume(on_message)
         print("Waiting for the messages from the future")
         await asyncio.Future()
 
