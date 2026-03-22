@@ -2,6 +2,23 @@
 
 Welcome to hell!
 
+**Please, be advised it is just a prototype that was developed in a very limited span of time. There are still possible improvements.**
+
+Test result on my machine
+```
+[dadaskis@Dadaskis api_gateway]$ wrk -t 12 -c 2400 -d 60 --timeout 6 http://localhost:80
+Running 1m test @ http://localhost:80
+  12 threads and 2400 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.06s    91.91ms   5.59s    92.17%
+    Req/Sec    43.71     62.26   460.00     88.60%
+  10833 requests in 1.00m, 2.23MB read
+  Socket errors: connect 1391, read 0, write 0, timeout 1214
+  Non-2xx or 3xx responses: 1214
+Requests/sec:    180.43
+Transfer/sec:     37.96KB
+```
+
 This is a demonstration of a "classic" high-load setup where an API endpoint performs a heavy operation (simulated 5-second processing) while handling concurrent requests. The system uses FastAPI as an API gateway, RabbitMQ for message queuing, and Redis for result storage, enabling horizontal scalability of the processing microservice.
 
 ## Architecture Overview
