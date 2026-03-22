@@ -1,142 +1,295 @@
 # Pseudo High-Load
 
-Just gonna make some kind of basic high-load setup, nothing to see here for now. `main.py` is just a simple FastAPI gateway. I managed to set it up with Nginx and uvicorn.
+Welcome to hell!
 
-## uvicorn
-`gpython -m uvicorn main:app --host 0.0.0.0 --port 8001`
-Where `gpython` is just an alias to my "global" Python virtual environment.
+This is a demonstration of a "classic" high-load setup where an API endpoint performs a heavy operation (simulated 5-second processing) while handling concurrent requests. The system uses FastAPI as an API gateway, RabbitMQ for message queuing, and Redis for result storage, enabling horizontal scalability of the processing microservice.
 
-## Nginx
-I had the following config for my Nginx server that serves solely as a load-balancer.
+## Architecture Overview
+
+- **API Gateway** (`api_gateway/main.py`): FastAPI application that receives HTTP requests, publishes them to RabbitMQ, and waits for results via Redis Pub/Sub
+- **Microservice** (`microservice/main.py`): Worker that consumes messages from RabbitMQ, simulates 5 seconds of processing, and publishes results to Redis
+- **Redis**: Acts as a result store and notification system via Pub/Sub channels
+- **RabbitMQ**: Message broker for distributing tasks to worker instances
+
+When a request hits the gateway endpoint (`/`), it:
+1. Generates a correlation ID
+2. Publishes the task to the `main` RabbitMQ queue
+3. Subscribes to Redis Pub/Sub channel for the result
+4. Returns the result once available (or times out)
+
+## Prerequisites
+
+- Python 3.10 or higher
+- RabbitMQ server
+- Redis server
+- Systemd (for running services)
+
+## Arch Linux Setup
+
+**Please, be advised - this is a minimalistic setup and I didn't really check it on my own. Production setup may differ, but this set of steps *supposedly* worked on my machine.**
+
+### 1. Install Required Packages
+
+```bash
+sudo pacman -S python python-pip rabbitmq valkey nginx
 ```
-#user http;
+
+### 2. Configure File Descriptor Limits
+
+RabbitMQ, Redis, Nginx (especially Nginx) require sufficient file descriptors to handle concurrent connections. Add the following to `/etc/security/limits.conf`:
+
+```bash
+# Add these lines
+* soft nofile 65536
+* hard nofile 65536
+root soft nofile 65536
+root hard nofile 65536
+```
+
+For systemd services, override the limits in service files or add to `/etc/systemd/system.conf`:
+
+```ini
+DefaultLimitNOFILE=65536
+```
+
+After making changes, reboot or restart the user session.
+
+### 3. Configure Nginx
+Edit a configuration file `/etc/nginx/nginx.conf` with a following config:
+
+```nginx
 worker_processes  1;
 
-#error_log  logs/error.log;
-#error_log  logs/error.log  notice;
-#error_log  logs/error.log  info;
+error_log  logs/error.log;
 
-#pid        logs/nginx.pid;
-
-
-# Load all installed modules
 include modules.d/*.conf;
 
+worker_rlimit_nofile 128000;
+
 events {
-    worker_connections  1024;
+    worker_connections  4096; # Increase worker_connections to handle high load
 }
 
 
 http {
     include       mime.types;
     default_type  application/octet-stream;
-
-    #log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-    #                  '$status $body_bytes_sent "$http_referer" '
-    #                  '"$http_user_agent" "$http_x_forwarded_for"';
-
-    #access_log  logs/access.log  main;
+    
+    access_log  logs/access.log  main;
 
     sendfile        on;
-    #tcp_nopush     on;
+    
+    keepalive_timeout  65; # Necessary for high load too
 
-    #keepalive_timeout  0;
-    keepalive_timeout  65;
-
-    #gzip  on;
-
-    upstream fastapi_backend {
+    upstream fastapi_backend { # Create a new backend
+        keepalive 128; # Necessary for high load
+        
+        # A bunch of addresses to different API gateways
         server 127.0.0.1:8000;
-        #server 127.0.0.1:8001;
-        #server 127.0.0.1:8002;
+        server 127.0.0.1:8001;
+        server 127.0.0.1:8002;
     }
 
     server {
         listen       80;
         server_name  localhost;
 
-        #charset koi8-r;
+        access_log  logs/host.access.log  main;
 
-        #access_log  logs/host.access.log  main;
-
+        # 80th port root, it will redirect to API gateways
         location / {
-            #root   /usr/share/nginx/html;
-            #index  index.html index.htm;
-            proxy_pass http://fastapi_backend;
+            proxy_pass http://fastapi_backend; # Telling it to use our API gateways
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
         }
-
-        #error_page  404              /404.html;
-
-        # redirect server error pages to the static page /50x.html
-        #
+        
         error_page   500 502 503 504  /50x.html;
         location = /50x.html {
             root   /usr/share/nginx/html;
         }
-
-        # proxy the PHP scripts to Apache listening on 127.0.0.1:80
-        #
-        #location ~ \.php$ {
-        #    proxy_pass   http://127.0.0.1;
-        #}
-
-        # pass the PHP scripts to FastCGI server listening on 127.0.0.1:9000
-        #
-        #location ~ \.php$ {
-        #    root           html;
-        #    fastcgi_pass   127.0.0.1:9000;
-        #    fastcgi_index  index.php;
-        #    fastcgi_param  SCRIPT_FILENAME  /scripts$fastcgi_script_name;
-        #    include        fastcgi_params;
-        #}
-
-        # deny access to .htaccess files, if Apache's document root
-        # concurs with nginx's one
-        #
-        #location ~ /\.ht {
-        #    deny  all;
-        #}
     }
-
-
-    # another virtual host using mix of IP-, name-, and port-based configuration
-    #
-    #server {
-    #    listen       8000;
-    #    listen       somename:8080;
-    #    server_name  somename  alias  another.alias;
-
-    #    location / {
-    #        root   html;
-    #        index  index.html index.htm;
-    #    }
-    #}
-
-
-    # HTTPS server
-    #
-    #server {
-    #    listen       443 ssl;
-    #    server_name  localhost;
-
-    #    ssl_certificate      cert.pem;
-    #    ssl_certificate_key  cert.key;
-
-    #    ssl_session_cache    shared:SSL:1m;
-    #    ssl_session_timeout  5m;
-
-    #    ssl_ciphers  HIGH:!aNULL:!MD5;
-    #    ssl_prefer_server_ciphers  on;
-
-    #    location / {
-    #        root   html;
-    #        index  index.html index.htm;
-    #    }
-    #}
-
 }
 ```
 
-My primary target in this repo is to make a bit more sophisticated setup with multiple workers involved. Some kind of basic microservices architecture with communication through RabbitMQ. That's gonna be fun.
+### 4. Start and Enable Services
+
+```bash
+# Start RabbitMQ
+sudo systemctl enable --now rabbitmq
+
+# Start Redis
+sudo systemctl enable --now valkey
+
+# Start Nginx
+sudo systemctl enable --now nginx
+```
+
+### 5. Verify Services
+
+```bash
+# Check RabbitMQ status (management plugin optional)
+sudo rabbitmqctl status
+
+# Check Redis status
+redis-cli ping
+# Should return PONG
+```
+
+### 6. Clone the Repository
+
+```bash
+git clone https://github.com/Dadaskis/pseudo_highload
+cd pseudo_highload
+```
+
+### 7. Create Virtual Environment and Install Dependencies
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install fastapi uvicorn aio-pika redis aiohttp
+```
+
+## Running the System
+
+### Terminal 1: Start the Microservice
+
+```bash
+cd microservice
+python main.py 1  # The number is the service ID for logging
+```
+
+### Terminal 2: Start the API Gateway
+
+```bash
+cd api_gateway
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+### Terminal 3: Test the API
+
+```bash
+curl http://localhost:8000/
+# Wait ~5 seconds, response: {"message":"Response for <uuid>"}
+
+# Health check
+curl http://localhost:8000/health
+# Response: {"status":"ok"}
+```
+
+## Scaling the Microservice
+
+To scale horizontally, simply start additional instances:
+
+```bash
+# Terminal 1
+cd api_gateway
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+
+# Terminal 2
+cd api_gateway
+uvicorn main:app --host 0.0.0.0 --port 8001 --workers 1
+
+# Terminal 3
+cd api_gateway
+uvicorn main:app --host 0.0.0.0 --port 8002 --workers 1
+
+# Terminal 3
+cd microservice
+for i in {1..300}; do python main.py ${i} & done
+```
+
+RabbitMQ will distribute messages across all available consumers. The prefetch count is set to 50, allowing each worker to process up to 50 messages concurrently.
+
+## Load Testing
+
+The included `client_highload_test` script is for reference only (I liked that failed attempt too much to remove it). For proper load testing, use `wrk`:
+
+```bash
+# Install wrk AUR (using yay)
+yay -S wrk
+
+# Run load test (12 threads, 1000 connections, 30 seconds)
+# 80th port is Nginx load balancing requests between multiple API gateways (check Nginx configuration section)
+wrk -t 12 -c 1000 -d 30s --timeout 6s http://localhost:80/
+```
+
+## Configuration
+
+### RabbitMQ Connection
+Default: `amqp://guest:guest@localhost/`
+
+### Redis Connection
+Default: `localhost:6379`
+
+### Queue Names
+- **Task Queue**: `main`
+- **Result Pub/Sub Channel**: `results`
+- **Result Keys**: `result:{correlation_id}` (TTL: 60 seconds)
+
+### Microservice Settings
+- **Prefetch Count**: 50 messages per worker
+- **Processing Time**: 5 seconds (simulated)
+- **Message Expiration**: 6 seconds
+
+### API Gateway Settings
+- **RPC Timeout**: 7 seconds
+- **Port**: 8000
+
+## File Structure
+
+```
+pseudo_highload/
+├── api_gateway/
+│   └── main.py          # FastAPI gateway, RPC client
+├── microservice/
+│   └── main.py          # Worker that processes tasks
+├── client_highload_test/
+│   └── main.py          # Reference load test (not recommended)
+├── _line_counter.py     # Utility to analyze repository
+├── README.md
+└── .gitignore
+```
+
+## Troubleshooting
+
+### Connection Refused Errors
+
+Ensure RabbitMQ and Redis are running:
+```bash
+sudo systemctl status rabbitmq redis
+```
+
+### File Descriptor Limits
+
+Check current limits:
+```bash
+ulimit -n
+# Should show 65536
+```
+
+Check RabbitMQ file descriptors:
+```bash
+sudo rabbitmqctl status | grep file_descriptors
+```
+
+### Redis Pub/Sub Not Working
+
+Verify Redis is configured correctly:
+```bash
+redis-cli INFO stats | grep pubsub
+```
+
+### High Load Simulation Issues
+
+The included Python client has limitations. Use `wrk` or `hey` for accurate load testing:
+```bash
+# Alternative: hey (install from AUR)
+hey -n 1000 -c 100 http://localhost:8000/
+```
+
+## License
+
+MIT License. *Happiness to everyone!*

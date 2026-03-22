@@ -37,13 +37,25 @@ from aio_pika import \
         Message, connect, Connection, \
             Channel, Queue, Exchange, \
                 ExchangeType, IncomingMessage
+from redis import asyncio as aioredis
 from aiormq.exceptions import ChannelNotFoundEntity
 import asyncio
+import sys
 
 # Just basic RabbitMQ stuff
 connection: Connection
 channel: Channel
 queue: Queue
+
+# Holy Redis
+redis_con: aioredis.Redis
+
+service_id = 0
+
+try:
+    service_id = sys.argv[1]
+except Exception as ex:
+    print("No service ID!")
 
 async def get_queue_safe(channel: Channel, queue_name: str) -> Queue:
     """
@@ -116,9 +128,17 @@ async def on_message(message: IncomingMessage):
         Returns:
             Nothing.
     """
-    global channel
+    global redis_con, service_id
+
+    print(f"Service {service_id} processing {message.correlation_id}")
+
     await asyncio.sleep(5.0)
     message_text = f"Response for {message.correlation_id}"
+
+    """
+    # This is the old way.
+    # Let's say "goodbye" to the old way.
+    # Fuck you, the old way, we never liked you.
     await channel.default_exchange.publish(
         Message(
             message_text.encode(),
@@ -126,6 +146,13 @@ async def on_message(message: IncomingMessage):
         ),
         routing_key=message.reply_to
     )
+    """
+
+    await redis_con.setex(f"result:{message.correlation_id}", 60, message_text)
+    await redis_con.publish("results", message.correlation_id)
+
+    print(f"Service {service_id} published results of {message.correlation_id}")
+
     await message.ack()
 
 async def main():
@@ -134,22 +161,23 @@ async def main():
         It has basic RabbitMQ initialization logic, and when everything has been setup,
         it just enters a sleeping state with "await asyncio.Future()"
     """
-    global connection, channel, queue
-    print("Backend start up!")
+    global connection, channel, queue, redis_con, service_id
+    print(f"Backend start up - {service_id}!")
     
     connection = await connect("amqp://guest:guest@localhost/")
+    redis_con = aioredis.Redis(host="localhost", port=6379, decode_responses=True)
     
     async with connection:
         channel = await connection.channel()
 
-        # Setting QOS to process only one at the time.
+        # Setting QOS to process only fifty at the time.
         # If the currently processed message was acknowledged,
         # only then we get a new message from the queue.
-        await channel.set_qos(prefetch_count=1)
+        await channel.set_qos(prefetch_count=50)
 
         queue = await get_queue_safe(channel, "main")
         await queue.consume(on_message)
-        print("Waiting for the messages from the future")
+        print(f"Waiting for the messages from the future - {service_id}")
 
         # TODO: Rewrite this to a somewhat graceful shutdown.
         # For now it just makes the "main()" coroutine sleep forever.

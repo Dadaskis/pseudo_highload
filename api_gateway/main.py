@@ -18,6 +18,8 @@ from typing import MutableMapping
 from aio_pika import \
         Message, connect, Connection,\
                 Channel, Queue, Exchange, ExchangeType
+from redis import asyncio as aioredis
+from datetime import timedelta
 import asyncio
 import uuid
 
@@ -41,6 +43,9 @@ class MicroserviceRPCClient:
     channel: Channel
     callback_queue: Queue
     exchange: Exchange
+    redis: aioredis.Redis
+    pubsub: aioredis.client.PubSub
+    pubsub_task: asyncio.Task
 
     def __init__(self):
         """
@@ -107,105 +112,30 @@ class MicroserviceRPCClient:
             A RabbitMQ initialization logic.
             0. Connects to "amqp://guest:guest@localhost/".
             1. Gets a channel.
-            2. Gets a "main_callback" queue.
-            3. Registers a message callback at "main_callback".
+            2. Initializes Redis
+            3. Subscribes to Redis pubsub called "results"
         """
         self.connection = await connect("amqp://guest:guest@localhost/")
         self.channel = await self.connection.channel()
-        self.callback_queue = await self.get_queue_safe("main_callback")
-        await self.callback_queue.consume(self.on_response)
+        self.redis = aioredis.Redis(host="localhost", port=6379, decode_responses=True)
+        self.pubsub = self.redis.pubsub()
+        await self.pubsub.subscribe("results")
+        self.pubsub_task = asyncio.create_task(self.listen_to_pubsub())
     
-    async def on_response(self, message: Message):
+    async def listen_to_pubsub(self):
         """
-            Called on a new unprocessed message from "main_callback" queue.
-            0. Checks if there's a correlation_id, if it is None - rejects the message entirely (no requeuing).
-            1. Checks if there's a registered "future" promised value at self.futures.
-               If there's none, rejects the message and requeues it.
-               ...
-               THIS is the part where I deeply regret that I didn't use Redis here.
-               There are better solutions than doing what I do here, but it's such a clusterfuck to develop...
-               In Redis you can just store the result by ID and then later get it.
-               If you REALLY wonder what could've been done here, I'm just going to leave some code here.
-            
-               VARIANT 1 - Sharding.
-                    ```
-                    exchange = await channel.declare_exchange(
-                        "user_tasks",
-                        ExchangeType("x-consistent-hash"),
-                        durable=True
-                    )
-
-                    queue1 = await channel.declare_queue("worker1", durable=True)
-                    await queue1.bind(exchange, routing_key="0")
-
-                    queue2 = await channel.declare_queue("worker2", durable=True)
-                    await queue2.bind(exchange, routing_key="1")
-
-                    await exchange.publish(
-                        message,
-                        routing_key=str(hash(user_id)) 
-                    )
-                    ```
-               It's basically about making several queues, where different workers get their shit.
-               Should I say that this implementation is just ATROCIOUS?
-
-               Variant 2 - Dead Letter Exchange
-                    ```
-                    queue = await channel.declare_queue(
-                        "main",
-                        durable=True,
-                        arguments={
-                            "x-message-ttl": 60000,
-                            "x-dead-letter-exchange": "dlx"
-                        }
-                    )
-
-                    dlx = await channel.declare_exchange("dlx", ExchangeType.DIRECT)
-                    dead_queue = await channel.declare_queue("main_dead", durable=True)
-                    await dead_queue.bind(dlx, routing_key="main_dead")
-                    ```
-               Basically, the idea is simple, make a "Dead Letter Exchange" for those messages
-               that you brutally reject with no requeuing. They end up in that pile of trash that
-               you can later check. Okay, would YOU wanna iterate through million of those potential
-               thrown-away letters? I would NOT.
-            
-               You know what they say, like, insanity is about repeating the same action over and over
-               again thinking you will get any different results? So yeah, that's what I do with messages
-               here, if it ain't fit I just put it back hoping the other workers will work with that.
-               One of them will, but how many CPU time will we waste on the same message?
-               ...
-            ...
-            Let's pretend I didn't turn this comment section into a confession.
-            
-            UPDATE: After testing that shit with "wrk" utility I managed to break it.
-            It broke when there were 3 instances of that API gateway, but I'm not too surprised about that.
-            You know what was *really* surprising? The fact that I managed to break it even with a single
-            instance of that API gateway.
-            That implementation sucks so hard I'll just go and use Redis, fuck that.
-
-            ...
-            2. Get a "future" promised value, put a result into it...
-            3. Acknowledge the message :)
+            Listens to Redis' PubSub called "results", if there's a value we are looking for,
+            it sets it to appropriate "future" promised value and then it gets returned.
+            Everyone are happy. Nobody remembers about the RabbitMQ catastrophe.
         """
-        if message.correlation_id is None:
-            print(f"Whoopsie doopsie the message is invalid: {message!r}")
-            await message.reject(requeue=False)
-            return
-        if not self.futures.get(message.correlation_id):
-            print(f"No {message.correlation_id} ID at futures")
-            # print(self.futures)
-            return_count = message.headers.get("return_counter", 0)
-            if return_count > 10:
-                await message.reject(requeue=False)
-                return
-            return_count += 1
-            message.headers["return_counter"] = return_count
-            await message.reject(requeue=True)
-            return
-        future: asyncio.Future
-        future = self.futures.pop(message.correlation_id)
-        future.set_result(message.body)
-        await message.ack()
+        async for message in self.pubsub.listen():
+            if message["type"] == "message":
+                correlation_id = message["data"]
+                future = self.futures.pop(correlation_id, None)
+                if future and not future.done():
+                    result = await self.redis.get(f"result:{correlation_id}")
+                    if result:
+                        future.set_result(result)
     
     async def call(self, message_text: str):
         """
@@ -223,18 +153,19 @@ class MicroserviceRPCClient:
                 message_text.encode(),
                 content_type="text/plain",
                 correlation_id=correlation_id,
-                reply_to=self.callback_queue.name
+                expiration=timedelta(seconds=6)
             ),
             routing_key="main"
         )
 
-        return await future
+        return await asyncio.wait_for(future, timeout=7)
 
     async def close(self):
         """
             Closes the RabbitMQ connection.
         """
         await self.connection.close()
+        await self.redis.close()
 
 rpc = MicroserviceRPCClient()
 
