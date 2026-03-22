@@ -56,13 +56,11 @@ class MicroserviceRPCClient:
     
     async def call(self, message_text: str):
         correlation_id = str(uuid.uuid4())
-        print(f"Calling: {message_text} {correlation_id}")
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         self.futures[correlation_id] = future
 
-        print("Publishing...")
         await self.channel.default_exchange.publish(
             Message(
                 message_text.encode(),
@@ -73,7 +71,6 @@ class MicroserviceRPCClient:
             routing_key="main"
         )
 
-        print("Waiting for the future to come...")
         return await future
 
     async def close(self):

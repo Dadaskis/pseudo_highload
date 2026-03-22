@@ -27,11 +27,7 @@ async def get_exchange_safe(
 
 async def on_message(message: IncomingMessage):
     global channel
-    print(f"Received message: {message}")
-    print(f"Received message body: {message.body}")
-    print("Before sleep...")
     await asyncio.sleep(5.0)
-    print("After sleep...")
     message_text = f"Response for {message.correlation_id}"
     await channel.default_exchange.publish(
         Message(
